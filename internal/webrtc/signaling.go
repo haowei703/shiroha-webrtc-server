@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"encoding/json"
+	"github.com/asticode/go-astiav"
 	"github.com/gorilla/websocket"
 	"github.com/haowei703/webrtc-server/internal/grpc"
 	"github.com/pion/webrtc/v3"
@@ -158,7 +159,19 @@ func handleAudioTrack(track *webrtc.TrackRemote) {
 }
 
 func handleVideoTrack(track *webrtc.TrackRemote, writeMessage func(messageType int, data []byte) error) {
-	vd, err := NewVideoDecoder()
+	var vd *VideoDecoder
+	var err error
+
+	mimeType := track.Codec().MimeType
+	codec := strings.Split(mimeType, "/")[1]
+	switch codec {
+	case "VP8":
+		vd, err = NewVideoDecoder(astiav.CodecIDVp8)
+	case "VP9":
+		vd, err = NewVideoDecoder(astiav.CodecIDVp9)
+	case "H264":
+		vd, err = NewVideoDecoder(astiav.CodecIDH264)
+	}
 	if err != nil {
 		panic(err)
 	}
@@ -176,8 +189,6 @@ func handleVideoTrack(track *webrtc.TrackRemote, writeMessage func(messageType i
 		var rgbData []byte
 		var width, height int
 
-		mimeType := track.Codec().MimeType
-		codec := strings.Split(mimeType, "/")[1]
 		rgbData, width, height, err = vd.processRTPPacket(rtp, codec)
 		if err != nil {
 			log.Println("error processing RTP packet:", err)

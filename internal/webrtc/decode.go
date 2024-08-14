@@ -5,13 +5,19 @@ import (
 	"fmt"
 	"github.com/asticode/go-astiav"
 	"github.com/pion/rtp"
-	"github.com/pion/rtp/codecs"
 	"image/png"
 	"log"
 	"os"
 	"sync"
 	"time"
 )
+
+var unmarshallerMap = map[string]PacketUnmarshaller{
+	"VP8":  &VP8PacketUnmarshaller{},
+	"VP9":  &VP9PacketUnmarshaller{},
+	"H264": &H264PacketUnmarshaller{},
+	"H265": &H265PacketUnmarshaller{},
+}
 
 // VideoDecoder 视频解码器
 type VideoDecoder struct {
@@ -20,24 +26,25 @@ type VideoDecoder struct {
 	mu          sync.Mutex        // 用于并发保护 frameBuffer
 }
 
-func NewVideoDecoder() (*VideoDecoder, error) {
+func NewVideoDecoder(codec astiav.CodecID) (*VideoDecoder, error) {
 	vd := &VideoDecoder{
 		frameBuffer: make(map[uint32][]byte),
 	}
-	err := vd.initDecoder()
+	err := vd.initDecoder(codec)
 	return vd, err
 }
 
 // initDecoder initializes the VP8 videoCodec context
-func (vd *VideoDecoder) initDecoder() error {
+func (vd *VideoDecoder) initDecoder(codec astiav.CodecID) error {
 	// Initialize FFmpeg
 	astiav.SetLogLevel(astiav.LogLevelDebug)
 
-	// Find VP8 videoCodec
-	videoCodec := astiav.FindDecoder(astiav.CodecIDVp8)
+	videoCodec := astiav.FindDecoder(codec)
 	if videoCodec == nil {
 		return fmt.Errorf("unsupported codec")
 	}
+
+	log.Printf("The decoder currently in use is %s\n", codec)
 
 	// Allocate a codec context for the videoCodec
 	codecContext := astiav.AllocCodecContext(videoCodec)
@@ -59,19 +66,16 @@ func (vd *VideoDecoder) processRTPPacket(packet *rtp.Packet, codec string) ([]by
 	vd.mu.Lock()
 	defer vd.mu.Unlock()
 
-	log.Println("the number of packets is ", packet.SequenceNumber)
-
 	var nalUnit []byte
 	var err error
-	switch codec {
-	case "VP8":
-		var vp8Packet codecs.VP8Packet
-		nalUnit, err = vp8Packet.Unmarshal(packet.Payload)
-		if err != nil {
-			return nil, 0, 0, fmt.Errorf("failed to unmarshal vp8 packet: %v", err)
-		}
-	default:
+
+	unmarshaller, ok := unmarshallerMap[codec]
+	if !ok {
 		return nil, 0, 0, fmt.Errorf("unsupported codec: %s", codec)
+	}
+	nalUnit, err = unmarshaller.Unmarshal(packet.Payload)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("error unmarshalling payload: %w", err)
 	}
 
 	// 将 NAL 单元数据添加到缓冲区中
@@ -85,22 +89,14 @@ func (vd *VideoDecoder) processRTPPacket(packet *rtp.Packet, codec string) ([]by
 	if packet.Marker {
 		frame := vd.frameBuffer[packet.SSRC]
 		delete(vd.frameBuffer, packet.SSRC)
-		return vd.processVideoFrame(frame, codec)
+		return vd.decodeFrameToRGBArray(frame)
 	}
 	// 视频帧不完整则返回nil
 	return nil, 0, 0, nil
 }
 
-// processVideoFrame 使用astiav处理视频帧，解码为RGB格式
-func (vd *VideoDecoder) processVideoFrame(input []byte, codec string) ([]byte, int, int, error) {
-	if codec == "VP8" {
-		return vd.decodeVp8FrameToRGBArray(input)
-	}
-	return nil, 0, 0, nil
-}
-
-// decodeVp8FrameToRGBArray VP8视频帧解码为RGB格式
-func (vd *VideoDecoder) decodeVp8FrameToRGBArray(input []byte) ([]byte, int, int, error) {
+// decodeFrameToRGBArray 视频帧解码为RGB格式
+func (vd *VideoDecoder) decodeFrameToRGBArray(input []byte) ([]byte, int, int, error) {
 	packet := astiav.AllocPacket()
 	if packet == nil {
 		log.Fatal("could not allocate packet")
@@ -158,7 +154,6 @@ func (vd *VideoDecoder) decodeVp8FrameToRGBArray(input []byte) ([]byte, int, int
 	}
 	rgbData := make([]byte, len(data))
 	copy(rgbData, data)
-	log.Println("sent time is", time.Now())
 	return rgbData, frame.Width(), frame.Height(), nil
 }
 
