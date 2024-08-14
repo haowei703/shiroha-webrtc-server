@@ -21,25 +21,39 @@ var unmarshallerMap = map[string]PacketUnmarshaller{
 
 // VideoDecoder 视频解码器
 type VideoDecoder struct {
-	ctx         *astiav.CodecContext
-	frameBuffer map[uint32][]byte // 用于存储未完成的视频帧
-	mu          sync.Mutex        // 用于并发保护 frameBuffer
+	ctx          *astiav.CodecContext
+	unmarshaller PacketUnmarshaller
+	mu           sync.Mutex // 用于并发保护 frameBuffer
 }
 
-func NewVideoDecoder(codec astiav.CodecID) (*VideoDecoder, error) {
-	vd := &VideoDecoder{
-		frameBuffer: make(map[uint32][]byte),
+func NewVideoDecoder(codec string) (*VideoDecoder, error) {
+	vd := &VideoDecoder{}
+	unmarshaller, ok := unmarshallerMap[codec]
+	if !ok {
+		return nil, fmt.Errorf("video decoder for %s not supported", codec)
 	}
+	vd.unmarshaller = unmarshaller
 	err := vd.initDecoder(codec)
 	return vd, err
 }
 
 // initDecoder initializes the VP8 videoCodec context
-func (vd *VideoDecoder) initDecoder(codec astiav.CodecID) error {
+func (vd *VideoDecoder) initDecoder(codec string) error {
 	// Initialize FFmpeg
 	astiav.SetLogLevel(astiav.LogLevelDebug)
 
-	videoCodec := astiav.FindDecoder(codec)
+	var videoCodec *astiav.Codec
+	switch codec {
+	case "VP8":
+		videoCodec = astiav.FindDecoder(astiav.CodecIDVp8)
+	case "VP9":
+		videoCodec = astiav.FindDecoder(astiav.CodecIDVp9)
+	case "H264":
+		videoCodec = astiav.FindDecoder(astiav.CodecIDH264)
+	case "H265":
+		videoCodec = astiav.FindDecoder(astiav.CodecIDH265)
+	}
+
 	if videoCodec == nil {
 		return fmt.Errorf("unsupported codec")
 	}
@@ -62,41 +76,28 @@ func (vd *VideoDecoder) initDecoder(codec astiav.CodecID) error {
 }
 
 // processRTPPacket 处理RTP包
-func (vd *VideoDecoder) processRTPPacket(packet *rtp.Packet, codec string) ([]byte, int, int, error) {
+func (vd *VideoDecoder) processRTPPacket(packet *rtp.Packet) ([]byte, int, int, error) {
 	vd.mu.Lock()
 	defer vd.mu.Unlock()
 
-	var nalUnit []byte
-	var err error
-
-	unmarshaller, ok := unmarshallerMap[codec]
-	if !ok {
-		return nil, 0, 0, fmt.Errorf("unsupported codec: %s", codec)
-	}
-	nalUnit, err = unmarshaller.Unmarshal(packet.Payload)
+	frame, err := vd.unmarshaller.Unmarshal(packet)
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("error unmarshalling payload: %w", err)
 	}
-
-	// 将 NAL 单元数据添加到缓冲区中
-	if buf, ok := vd.frameBuffer[packet.SSRC]; ok {
-		vd.frameBuffer[packet.SSRC] = append(buf, nalUnit...)
-	} else {
-		vd.frameBuffer[packet.SSRC] = nalUnit
-	}
-
-	// 检查 RTP 包的 Marker 位，Marker 位为 1 表示这是一个完整帧的结束
-	if packet.Marker {
-		frame := vd.frameBuffer[packet.SSRC]
-		delete(vd.frameBuffer, packet.SSRC)
+	if frame != nil {
 		return vd.decodeFrameToRGBArray(frame)
 	}
+
 	// 视频帧不完整则返回nil
 	return nil, 0, 0, nil
 }
 
 // decodeFrameToRGBArray 视频帧解码为RGB格式
 func (vd *VideoDecoder) decodeFrameToRGBArray(input []byte) ([]byte, int, int, error) {
+	if len(input) <= 0 || input == nil {
+		return nil, 0, 0, fmt.Errorf("invalid input")
+	}
+
 	packet := astiav.AllocPacket()
 	if packet == nil {
 		log.Fatal("could not allocate packet")
