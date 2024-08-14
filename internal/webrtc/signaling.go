@@ -10,11 +10,44 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Message struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
+}
+
+type SignRecognition struct {
+	lastResult     string
+	lastTimestamp  time.Time
+	mutex          sync.Mutex
+	debouncePeriod time.Duration
+}
+
+func NewSignRecognition(debouncePeriod time.Duration) *SignRecognition {
+	return &SignRecognition{
+		lastResult:     "",
+		lastTimestamp:  time.Now(),
+		debouncePeriod: debouncePeriod,
+	}
+}
+
+func (sr *SignRecognition) ProcessResult(result string) bool {
+	sr.mutex.Lock()
+	defer sr.mutex.Unlock()
+
+	now := time.Now()
+
+	// 如果识别结果相同且时间间隔小于阈值，则忽略
+	if result == sr.lastResult && now.Sub(sr.lastTimestamp) < sr.debouncePeriod {
+		return false
+	}
+
+	// 否则处理新结果并更新缓存
+	sr.lastResult = result
+	sr.lastTimestamp = now
+	return true
 }
 
 var upgrader = websocket.Upgrader{
@@ -130,6 +163,8 @@ func handleVideoTrack(track *webrtc.TrackRemote, writeMessage func(messageType i
 		panic(err)
 	}
 
+	recognizer := NewSignRecognition(2 * time.Second)
+
 	// 处理track
 	for {
 		rtp, _, readErr := track.ReadRTP()
@@ -157,13 +192,15 @@ func handleVideoTrack(track *webrtc.TrackRemote, writeMessage func(messageType i
 				return
 			}
 
-			data := map[string]string{"message": response}
-			jsonData, _ := json.Marshal(data)
-			// 将处理结果回传给客户端
-			msg := Message{Type: "text", Data: json.RawMessage(jsonData)}
-			jsonMsg, _ := json.Marshal(msg)
-			if err := writeMessage(websocket.TextMessage, jsonMsg); err != nil {
-				log.Println("Failed to send response:", err)
+			if recognizer.ProcessResult(response) && response != "result is None" {
+				data := map[string]string{"message": response}
+				jsonData, _ := json.Marshal(data)
+				// 将处理结果回传给客户端
+				msg := Message{Type: "text", Data: json.RawMessage(jsonData)}
+				jsonMsg, _ := json.Marshal(msg)
+				if err := writeMessage(websocket.TextMessage, jsonMsg); err != nil {
+					log.Println("Failed to send response:", err)
+				}
 			}
 		}
 	}
